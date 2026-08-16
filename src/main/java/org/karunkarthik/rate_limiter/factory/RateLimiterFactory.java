@@ -1,7 +1,9 @@
 package org.karunkarthik.rate_limiter.factory;
 
 import org.karunkarthik.rate_limiter.core.FixedWindow;
+import org.karunkarthik.rate_limiter.core.LeakyBucket;
 import org.karunkarthik.rate_limiter.core.RateLimiter;
+import org.karunkarthik.rate_limiter.core.SlidingWindowCounter;
 import org.karunkarthik.rate_limiter.core.SlidingWindowLog;
 import org.karunkarthik.rate_limiter.core.TokenBucket;
 import org.karunkarthik.rate_limiter.model.RateLimitConfig;
@@ -27,11 +29,10 @@ public final class RateLimiterFactory {
     public static RateLimiter createRateLimiter(RateLimitType algorithm, RateLimitConfig config) {
         return switch (algorithm) {
             case TOKEN_BUCKET -> new TokenBucket(config);
+            case LEAKY_BUCKET -> new LeakyBucket(config);
             case FIXED_WINDOW -> new FixedWindow(config);
             case SLIDING_WINDOW_LOG -> new SlidingWindowLog(config);
-            default -> throw new IllegalArgumentException(
-                    "Algorithm not implemented in this study project: " + algorithm
-                            + ". Implemented: TOKEN_BUCKET, FIXED_WINDOW, SLIDING_WINDOW_LOG.");
+            case SLIDING_WINDOW_COUNTER -> new SlidingWindowCounter(config);
         };
     }
 }

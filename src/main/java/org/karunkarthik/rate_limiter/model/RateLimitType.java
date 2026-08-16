@@ -3,15 +3,14 @@ package org.karunkarthik.rate_limiter.model;
 /**
  * Supported rate-limiting algorithms for factory wiring and tier configuration.
  *
- * <p>Implemented in this project: {@link #TOKEN_BUCKET}, {@link #FIXED_WINDOW}, {@link #SLIDING_WINDOW_LOG}.
- * Others are listed for interview comparison / future extension.</p>
+ * <p>Each value maps to a concrete class in {@code core} via {@code RateLimiterFactory}.</p>
  */
 public enum RateLimitType {
 
     /** Burst-tolerant bucket with steady token refill. See {@code TokenBucket}. */
     TOKEN_BUCKET,
 
-    /** Requests drip out at a fixed rate (not implemented here — contrast with token bucket in interviews). */
+    /** Bucket drains at a fixed rate; shapes bursts into steady outflow. See {@code LeakyBucket}. */
     LEAKY_BUCKET,
 
     /** Counter resets on fixed clock-aligned windows; watch for boundary spikes. */
@@ -20,6 +19,6 @@ public enum RateLimitType {
     /** Exact sliding window via timestamp queue; higher memory, highest precision. */
     SLIDING_WINDOW_LOG,
 
-    /** Hybrid: fixed window counters + weighted previous window (not implemented here). */
+    /** Hybrid: weighted previous + current fixed-window counters. See {@code SlidingWindowCounter}. */
     SLIDING_WINDOW_COUNTER
 }

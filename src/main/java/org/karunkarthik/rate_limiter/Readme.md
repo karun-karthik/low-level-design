@@ -1,7 +1,7 @@
 # Rate Limiter — LLD Study Notes
 
 Interview-oriented low-level design for **per-user API rate limiting**.  
-Three algorithms implemented; tier-based policy wired through a factory and service layer.
+All five `RateLimitType` values have concrete implementations; tier-based policy is wired through a factory and service layer.
 
 ---
 
@@ -13,8 +13,10 @@ rate_limiter/
 ├── core/
 │   ├── RateLimiter.java      # abstract strategy
 │   ├── TokenBucket.java
+│   ├── LeakyBucket.java
 │   ├── FixedWindow.java
-│   └── SlidingWindowLog.java
+│   ├── SlidingWindowLog.java
+│   └── SlidingWindowCounter.java
 ├── factory/
 │   └── RateLimiterFactory.java
 ├── service/
@@ -82,9 +84,40 @@ Refill   = 1 token every (windowInSeconds / maxRequests) seconds
 | Pros | Smooth traffic, natural bursts |
 | Cons | Refill is approximate without fractional tokens |
 
+**vs Leaky Bucket:** Token bucket *adds* credit while idle; leaky bucket *drains* backlog while idle.
+
 ---
 
-### 2. Fixed Window (`FixedWindow.java`)
+### 2. Leaky Bucket (`LeakyBucket.java`)
+
+**Idea:** Requests add water to a bucket. The bucket leaks at a fixed rate. If full, reject.
+
+```
+Capacity = maxRequests
+Leak rate = maxRequests / windowInSeconds  (units per second)
+
+     requests in ──▶ ┌─────────────────────────┐ ──▶ steady leak out
+                   │  ████████░░  level 8/10  │
+                   └─────────────────────────┘
+```
+
+**Per request**
+1. Leak: reduce level by `elapsedTime × leakRate`
+2. If level < capacity → allow and add 1
+3. Else → reject
+
+**State per user:** water level, last leak timestamp
+
+| | |
+|---|---|
+| Time | O(1) |
+| Space | O(users) |
+| Pros | Smooth predictable outflow |
+| Cons | Bursts fill bucket fast; stricter than token bucket for same params |
+
+---
+
+### 3. Fixed Window (`FixedWindow.java`)
 
 **Idea:** Divide time into fixed buckets. Count requests in the current bucket; reset when the bucket changes.
 
@@ -116,7 +149,7 @@ Limit = 100/min. Client sends 100 requests at `00:59` and 100 at `01:00` → **2
 
 ---
 
-### 3. Sliding Window Log (`SlidingWindowLog.java`)
+### 4. Sliding Window Log (`SlidingWindowLog.java`)
 
 **Idea:** Keep a queue of request timestamps. Drop entries outside the rolling window. Allow only if count < limit.
 
@@ -144,17 +177,46 @@ stale (evict)                    window start           now
 
 ---
 
+### 5. Sliding Window Counter (`SlidingWindowCounter.java`)
+
+**Idea:** Keep counts for the current and previous fixed windows. Estimate sliding-window usage with a weighted sum — O(1) without storing every timestamp.
+
+```
+Window N-1 (prev)          Window N (current)
+|-------- 60 s --------|-------- 60 s --------|
+count: 40               count: 20
+         └─ weight ────▶ 40 × (30s left / 60s) = 20
+
+estimated = 20 + 20 = 40  →  compare to maxRequests
+```
+
+**Per request**
+1. Compute current window index and elapsed time within it
+2. If window rolled over → `prev = old current`, reset current
+3. `estimated = prevCount × weight + currentCount`
+4. If estimated < maxRequests → allow and increment current
+5. Else → reject
+
+**State per user:** window index, previous window count, current window count
+
+| | |
+|---|---|
+| Time | O(1) |
+| Space | O(users) |
+| Pros | No timestamp log; reduces boundary spike vs pure fixed window |
+| Cons | Approximate — not as exact as sliding window log |
+
+---
+
 ## Comparison (interview cheat sheet)
 
-| | Token Bucket | Fixed Window | Sliding Window Log |
-|---|:---:|:---:|:---:|
-| Burst friendly | ✅ | ❌ | ❌ |
-| Exact "last T seconds" | ~ | ❌ | ✅ |
-| O(1) per request | ✅ | ✅ | ❌ |
-| Low memory | ✅ | ✅ | ❌ |
-| Boundary spike | No | **Yes** | No |
-
-**Not implemented here (know for interviews):** Leaky Bucket, Sliding Window Counter (hybrid of fixed windows).
+| | Token Bucket | Leaky Bucket | Fixed Window | Sliding Window Log | Sliding Window Counter |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Burst friendly | ✅ | ~ | ❌ | ❌ | ~ |
+| Exact "last T seconds" | ~ | ~ | ❌ | ✅ | ~ |
+| O(1) per request | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Low memory | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Boundary spike | No | No | **Yes** | No | Reduced |
 
 ---
 
@@ -199,4 +261,4 @@ Before an interview, you should be able to explain:
 3. **Time / space** complexity
 4. **Trade-offs** — especially fixed-window boundary spike vs sliding-window cost
 5. **Why** FREE uses token bucket (bursts OK) vs PREMIUM uses fixed window (simple, high quota)
-6. **How** you'd extend this — Redis for distributed limits, sliding window counter for memory efficiency
+6. **How** you'd extend this — Redis for distributed limits, sliding window counter for memory efficiency at scale

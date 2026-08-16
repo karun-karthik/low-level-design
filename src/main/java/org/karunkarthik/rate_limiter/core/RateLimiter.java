@@ -8,8 +8,10 @@ import org.karunkarthik.rate_limiter.model.RateLimitType;
  * Strategy interface — each implementation decides whether one request should be allowed.
  *
  * @see TokenBucket
+ * @see LeakyBucket
  * @see FixedWindow
  * @see SlidingWindowLog
+ * @see SlidingWindowCounter
  */
 @AllArgsConstructor
 public abstract class RateLimiter {
