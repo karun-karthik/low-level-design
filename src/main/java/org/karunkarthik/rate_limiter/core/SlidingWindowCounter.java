@@ -24,26 +24,47 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *     1. Compute current window index and how far we are into it
  *     2. If window rolled over → shift prev = old current, reset current
  *     3. estimated = prevCount × weight + currentCount
- *     4. If estimated &lt; maxRequests → ALLOW and increment current
+ *     4. If estimated < maxRequests → ALLOW and increment current
  *     5. Else → REJECT
  *
  *   Time: O(1)   Space: O(users)
  *   (+) no timestamp log, softens fixed-window boundary spike  (−) approximate, not exact
  * </pre>
+ * 
+ * Example:
+ * 10 requests / last 60 seconds
+ *
+ * Stores the count of requests in the previous and current windows.
+ *
+ * On each request:
+ * 1. Compute the current window index and how far we are into it.
+ * 2. If the window rolled over → shift prev = old current, reset current.
+ * 3. Estimate the requests in the last T seconds.
+ * 4. If the estimated requests < maxRequests → ALLOW and increment current.
+ * 5. Otherwise → REJECT.
  */
 public class SlidingWindowCounter extends RateLimiter {
 
+    /*
+     * Immutable state for one user's two windows.
+     *
+     * windowIndex           → current window
+     * previousWindowCount   → requests in previous window
+     * currentWindowCount    → requests in current window
+     */
     private record WindowCounterState(
             long windowIndex,
             int previousWindowCount,
             int currentWindowCount
     ) {
+
         static WindowCounterState forWindow(long windowIndex) {
             return new WindowCounterState(windowIndex, 0, 0);
         }
     }
 
-    private final ConcurrentHashMap<String, WindowCounterState> stateByUserId = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, WindowCounterState>
+            stateByUserId = new ConcurrentHashMap<>();
 
     public SlidingWindowCounter(RateLimitConfig config) {
         super(config, RateLimitType.SLIDING_WINDOW_COUNTER);
@@ -51,45 +72,108 @@ public class SlidingWindowCounter extends RateLimiter {
 
     @Override
     public boolean allowRequest(String userId) {
-        AtomicBoolean requestAllowed = new AtomicBoolean(false);
-        long requestTimeSeconds = System.currentTimeMillis() / 1000;
-        long currentWindowIndex = computeWindowIndex(requestTimeSeconds);
-        long elapsedSecondsInWindow = requestTimeSeconds % config.getWindowInSeconds();
 
+        long now = System.currentTimeMillis() / 1000;
+
+        long currentWindowIndex =
+                computeWindowIndex(now);
+
+        // How far we are into the current window.
+        long elapsedSecondsInWindow =
+                now % config.getWindowInSeconds();
+
+        AtomicBoolean allowed = new AtomicBoolean(false);
+
+        /*
+         * compute() makes the state update atomic for this user.
+         */
         stateByUserId.compute(userId, (id, state) -> {
+
+            // First request → start with an empty current window.
             if (state == null) {
-                state = WindowCounterState.forWindow(currentWindowIndex);
+                state = WindowCounterState
+                        .forWindow(currentWindowIndex);
             }
 
-            int previousCount = state.previousWindowCount();
-            int currentCount = state.currentWindowCount();
-            long storedWindowIndex = state.windowIndex();
+            int previousCount =
+                    state.previousWindowCount();
 
-            // Step 2: window rolled over — previous window count carries partial weight
+            int currentCount =
+                    state.currentWindowCount();
+
+            long storedWindowIndex =
+                    state.windowIndex();
+
+            /*
+             * New window started.
+             *
+             * Old current → previous
+             * New current → 0
+             */
             if (storedWindowIndex != currentWindowIndex) {
+
                 previousCount = currentCount;
                 currentCount = 0;
+
                 storedWindowIndex = currentWindowIndex;
             }
 
-            // Step 3: weight previous window by how much of it still overlaps the sliding window
+            /*
+             * Calculate how much of the previous window
+             * overlaps the current sliding window.
+             *
+             * Example:
+             * 60 sec window, 20 sec elapsed
+             *
+             * weight = (60 - 20) / 60
+             *        = 0.667
+             */
             double previousWindowWeight =
-                    (double) (config.getWindowInSeconds() - elapsedSecondsInWindow) / config.getWindowInSeconds();
-            double estimatedRequestCount = previousCount * previousWindowWeight + currentCount;
+                    (double) (
+                            config.getWindowInSeconds()
+                                    - elapsedSecondsInWindow
+                    ) / config.getWindowInSeconds();
 
-            // Step 4 & 5
+            /*
+             * Estimate requests in the last T seconds.
+             */
+            double estimatedRequestCount =
+                    previousCount * previousWindowWeight
+                            + currentCount;
+
+            /*
+             * Under limit → allow and increment current count.
+             */
             if (estimatedRequestCount < config.getMaxRequests()) {
-                requestAllowed.set(true);
-                return new WindowCounterState(storedWindowIndex, previousCount, currentCount + 1);
+
+                allowed.set(true);
+
+                return new WindowCounterState(
+                        storedWindowIndex,
+                        previousCount,
+                        currentCount + 1
+                );
             }
 
-            requestAllowed.set(false);
-            return new WindowCounterState(storedWindowIndex, previousCount, currentCount);
+            // Limit reached → reject without changing state.
+            allowed.set(false);
+
+            return new WindowCounterState(
+                    storedWindowIndex,
+                    previousCount,
+                    currentCount
+            );
         });
 
-        return requestAllowed.get();
+        return allowed.get();
     }
 
+    /**
+     * Converts absolute time into a fixed window number.
+     *
+     * Example:
+     * 125 / 60 = 2
+     */
     private long computeWindowIndex(long epochSeconds) {
         return epochSeconds / config.getWindowInSeconds();
     }

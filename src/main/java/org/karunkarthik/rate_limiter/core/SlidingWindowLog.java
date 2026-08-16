@@ -26,11 +26,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   Time: O(R) per request (R = requests in window)   Space: O(users × maxRequests)
  *   (+) most accurate sliding window  (−) higher memory and per-request cleanup cost
  * </pre>
+ * 
+ * Example:
+ * 10 requests / last 60 seconds
+ *
+ * Stores the timestamp of every request.
+ *
+ * On each request:
+ * 1. Remove timestamps outside the sliding window.
+ * 2. If remaining count < limit → allow and add timestamp.
+ * 3. Otherwise → reject.
+ *
  */
 public class SlidingWindowLog extends RateLimiter {
 
-    /** FIFO queue of request timestamps (epoch seconds). Front = oldest. */
-    private final ConcurrentHashMap<String, Queue<Long>> requestTimestampsByUserId = new ConcurrentHashMap<>();
+    // Each user has a queue of their request timestamps.
+    // Oldest timestamp is at the front.
+    private final ConcurrentHashMap<String, Queue<Long>>
+            requestTimestampsByUserId = new ConcurrentHashMap<>();
 
     public SlidingWindowLog(RateLimitConfig config) {
         super(config, RateLimitType.SLIDING_WINDOW_LOG);
@@ -38,32 +51,71 @@ public class SlidingWindowLog extends RateLimiter {
 
     @Override
     public boolean allowRequest(String userId) {
-        AtomicBoolean requestAllowed = new AtomicBoolean(false);
-        long requestTimeSeconds = System.currentTimeMillis() / 1000;
 
+        long now = System.currentTimeMillis() / 1000;
+        AtomicBoolean allowed = new AtomicBoolean(false);
+
+        /*
+         * compute() makes the update for this user atomic.
+         */
         requestTimestampsByUserId.compute(userId, (id, timestampLog) -> {
-            Queue<Long> log = timestampLog == null ? new ArrayDeque<>() : timestampLog;
 
-            // Step 1: drop expired entries from the front of the queue
-            evictExpiredTimestamps(log, requestTimeSeconds);
+            // First request → create an empty queue.
+            Queue<Long> log =
+                    timestampLog == null
+                            ? new ArrayDeque<>()
+                            : timestampLog;
 
-            // Step 2 & 3: admit or reject based on in-window count
+            // Remove requests that are too old.
+            evictExpiredTimestamps(log, now);
+
+            /*
+             * Remaining timestamps = requests in the
+             * current sliding window.
+             */
             if (log.size() < config.getMaxRequests()) {
-                requestAllowed.set(true);
-                log.offer(requestTimeSeconds);
+
+                allowed.set(true);
+
+                // Current request becomes part of the log.
+                log.offer(now);
+
             } else {
-                requestAllowed.set(false);
+                allowed.set(false);
             }
+
             return log;
         });
 
-        return requestAllowed.get();
+        return allowed.get();
     }
 
-    /** Polls timestamps that are no longer inside [now - window, now]. */
-    private void evictExpiredTimestamps(Queue<Long> timestampLog, long requestTimeSeconds) {
-        long windowStartSeconds = requestTimeSeconds - config.getWindowInSeconds();
-        while (!timestampLog.isEmpty() && timestampLog.peek() <= windowStartSeconds) {
+    /**
+     * Removes timestamps outside the sliding window.
+     *
+     * Example:
+     * now = 100
+     * window = 60
+     *
+     * Keep timestamps > 40.
+     * Remove timestamps <= 40.
+     */
+    private void evictExpiredTimestamps(
+            Queue<Long> timestampLog,
+            long now) {
+
+        long windowStart =
+                now - config.getWindowInSeconds();
+
+        /*
+         * Queue is ordered oldest → newest.
+         *
+         * So keep removing from the front until
+         * the oldest timestamp is inside the window.
+         */
+        while (!timestampLog.isEmpty()
+                && timestampLog.peek() <= windowStart) {
+
             timestampLog.poll();
         }
     }
