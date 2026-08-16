@@ -11,58 +11,57 @@ import java.util.concurrent.Executors;
 
 public class Main {
 
-    // call allow-req func 20 times simultaneously
+    /** Simulates 20 concurrent requests hitting the same user (tests thread safety). */
     static void checkConcurrency(RateLimiterService rateLimiterService) throws InterruptedException {
-        User freeUser1 = new User("user1", UserTier.FREE);
+        User freeUser = new User("user1", UserTier.FREE);
+        int threadCount = 20;
 
-        int threads = 20; // simulate 20 concurrent requests
-        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CyclicBarrier startGate = new CyclicBarrier(threadCount);
+        CountDownLatch done = new CountDownLatch(threadCount);
 
-        CyclicBarrier barrier = new CyclicBarrier(threads);
-        CountDownLatch latch = new CountDownLatch(threads);
-
-        for (int i = 1; i <= threads; i++) {
-            final int reqNum = i;
+        for (int i = 1; i <= threadCount; i++) {
+            final int requestNumber = i;
             executor.submit(() -> {
                 try {
-                    // all threads wait here until barrier is full
-                    barrier.await();
+                    startGate.await(); // all threads start together
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
 
-                boolean allowed = rateLimiterService.allowRequest(freeUser1);
-                System.out.println(Thread.currentThread().getName() +
-                        " | Request " + reqNum + " for FreeUser1: " + (allowed ? "ALLOWED" : "BLOCKED"));
+                boolean allowed = rateLimiterService.allowRequest(freeUser);
+                System.out.println(Thread.currentThread().getName()
+                        + " | Request " + requestNumber + ": " + (allowed ? "ALLOWED" : "BLOCKED"));
 
-                latch.countDown();
+                done.countDown();
             });
         }
 
-        latch.await(); // wait for all threads to finish
+        done.await();
         executor.shutdown();
     }
 
     public static void main(String[] args) throws InterruptedException {
         RateLimiterService rateLimiterService = new RateLimiterService();
 
-        User freeUser = new User("user1", UserTier.FREE); // 10 req in 60 sec
-        User premiumUser = new User("user2", UserTier.PREMIUM); // 100 req in 60 sec
+        User freeUser = new User("user1", UserTier.FREE);       // 10 req / 60 s (token bucket)
+        User premiumUser = new User("user2", UserTier.PREMIUM); // 100 req / 60 s (fixed window)
 
-//        System.out.println("=== Free User Requests ===");
+        // --- Sequential demo (uncomment to run) ---
+//        System.out.println("=== Free User ===");
 //        for (int i = 1; i <= 15; i++) {
 //            boolean allowed = rateLimiterService.allowRequest(freeUser);
-//            System.out.println("Request " + i + " for Free User: " + (allowed ? "ALLOWED" : "BLOCKED"));
-//            Thread.sleep(100); // simulate delay between requests
+//            System.out.println("Request " + i + ": " + (allowed ? "ALLOWED" : "BLOCKED"));
+//            Thread.sleep(100);
 //        }
 //
-//        System.out.println("\n=== Premium User Requests ===");
+//        System.out.println("\n=== Premium User ===");
 //        for (int i = 1; i <= 120; i++) {
 //            boolean allowed = rateLimiterService.allowRequest(premiumUser);
-//            System.out.println("Request " + i + " for Premium User: " + (allowed ? "ALLOWED" : "BLOCKED"));
+//            System.out.println("Request " + i + ": " + (allowed ? "ALLOWED" : "BLOCKED"));
 //            Thread.sleep(100);
 //        }
 
-          checkConcurrency(rateLimiterService);
+        checkConcurrency(rateLimiterService);
     }
 }

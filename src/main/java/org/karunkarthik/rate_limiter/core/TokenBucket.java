@@ -1,6 +1,5 @@
 package org.karunkarthik.rate_limiter.core;
 
-
 import org.karunkarthik.rate_limiter.model.RateLimitConfig;
 import org.karunkarthik.rate_limiter.model.RateLimitType;
 
@@ -8,9 +7,36 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Token Bucket — burst-friendly limiter with steady token refill.
+ *
+ * <pre>
+ *   Capacity = maxRequests tokens
+ *   Refill   = 1 token every (windowInSeconds / maxRequests) seconds
+ *
+ *        ┌─────────────────────────┐
+ *        │  Bucket (capacity = N)  │
+ *        │  ████████░░  8 / 10     │  ← each allowed request costs 1 token
+ *        └─────────────────────────┘
+ *                   ▲
+ *                   └── tokens drip in over time (computed lazily on each request)
+ *
+ *   Steps on allowRequest:
+ *     1. Refill tokens based on elapsed time
+ *     2. If balance > 0 → ALLOW and decrement
+ *     3. Else → REJECT
+ *
+ *   Time: O(1)   Space: O(users)
+ *   (+) smooth shaping, allows bursts  (−) approximate refill without fractional tokens
+ * </pre>
+ */
 public class TokenBucket extends RateLimiter {
-    private final Map<String, Integer> tokens = new ConcurrentHashMap<>();
-    private final Map<String, Long> lastRefillTime = new ConcurrentHashMap<>();
+
+    /** Tokens remaining per user. No entry means bucket is full. */
+    private final Map<String, Integer> tokenBalanceByUserId = new ConcurrentHashMap<>();
+
+    /** Last time (epoch ms) we applied a refill for this user. */
+    private final Map<String, Long> lastRefillEpochMillisByUserId = new ConcurrentHashMap<>();
 
     public TokenBucket(RateLimitConfig config) {
         super(config, RateLimitType.TOKEN_BUCKET);
@@ -18,35 +44,43 @@ public class TokenBucket extends RateLimiter {
 
     @Override
     public boolean allowRequest(String userId) {
-        AtomicBoolean allowed = new AtomicBoolean(false);
-        long now =  System.currentTimeMillis();
-        tokens.compute(userId, (id, availableTokens) -> {
-            int currentTokens = refillTokens(userId, now);
-            if (currentTokens > 0) {
-                allowed.set(true);
-                return currentTokens - 1;
-            } else {
-                allowed.set(false);
-                return currentTokens;
+        AtomicBoolean requestAllowed = new AtomicBoolean(false);
+        long requestTimeMillis = System.currentTimeMillis();
+
+        // compute() gives atomic read-modify-write per userId (thread-safe counter update)
+        tokenBalanceByUserId.compute(userId, (id, currentBalance) -> {
+            int tokensAfterRefill = refillTokens(userId, requestTimeMillis);
+
+            if (tokensAfterRefill > 0) {
+                requestAllowed.set(true);
+                return tokensAfterRefill - 1; // consume one token
             }
+
+            requestAllowed.set(false);
+            return tokensAfterRefill; // bucket empty — reject without changing balance
         });
 
-        return allowed.get();
+        return requestAllowed.get();
     }
 
-    private int refillTokens(String userId, long now) {
-        double refillRate = (double) config.getWindowInSeconds() / config.getMaxRequests();
-        lastRefillTime.putIfAbsent(userId, now);
-        long lastRefill = lastRefillTime.get(userId);
-        long elapsed = (now - lastRefill) / 1000;
+    /**
+     * Adds tokens for time elapsed since last refill.
+     * Example: 10 req / 60 s → 1 token every 6 s.
+     */
+    private int refillTokens(String userId, long requestTimeMillis) {
+        double secondsPerToken = (double) config.getWindowInSeconds() / config.getMaxRequests();
 
-        int refillTokens = (int) (elapsed / refillRate);
-        int currentTokens = tokens.getOrDefault(userId, config.getMaxRequests());
-        currentTokens = Math.min(config.getMaxRequests(), currentTokens + refillTokens);
+        lastRefillEpochMillisByUserId.putIfAbsent(userId, requestTimeMillis);
+        long lastRefillMillis = lastRefillEpochMillisByUserId.get(userId);
+        long elapsedSeconds = (requestTimeMillis - lastRefillMillis) / 1000;
 
-        if (refillTokens > 0) {
-            lastRefillTime.put(userId, now);
+        int tokensToAdd = (int) (elapsedSeconds / secondsPerToken);
+        int currentBalance = tokenBalanceByUserId.getOrDefault(userId, config.getMaxRequests());
+        int refilledBalance = Math.min(config.getMaxRequests(), currentBalance + tokensToAdd);
+
+        if (tokensToAdd > 0) {
+            lastRefillEpochMillisByUserId.put(userId, requestTimeMillis);
         }
-        return currentTokens;
+        return refilledBalance;
     }
 }
